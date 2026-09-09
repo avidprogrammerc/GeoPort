@@ -69,4 +69,11 @@ if ($ok) {
     $alive = (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) -ne $null
     Log ("port NOT up after 60s (python alive? {0})" -f $alive)
     Write-Warning "GeoPort did not come up in 60s - check GeoPort.log in the repo folder."
+    # Surface the failure - everything else in this launcher is hidden.
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            "GeoPort did not start within 60 seconds.\n\nSee launcher_trace.log and GeoPort.log in the GeoPort folder for details.",
+            "GeoPort launcher", "OK", "Error") | Out-Null
+    } catch { }
 }
