@@ -98,6 +98,11 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
+**Python 3.10 – 3.12 required** (3.13 is not supported yet: the `lzfse` C
+extension has no cp313 Windows wheel). On Windows, `start.ps1` does all of
+the above in one click: it creates `.\.venv` on first run (using `uv` if
+you have it), launches the app with no console window, and opens the UI.
+
 The web UI opens at `http://localhost:54321` (a random high port is used if
 that one is busy). A few extra switches are available:
 
@@ -111,6 +116,28 @@ that one is busy). A few extra switches are available:
 > **Tip (issue #44):** if you also use Xcode to deploy to the same iPhone,
 > leave `--restart-remoted` off. Disconnecting from GeoPort now releases the
 > tunnel cleanly so Xcode can connect again.
+
+### Features in the source build beyond the release exe
+
+- **Server-side route/GPX playback** - the Play button now sends the route to
+  the server, which walks it at the selected speed (walk/run/ride/drive) with
+  one tunnel session for the whole route. Pause holds the last point; Stop
+  clears the device location. Progress: `/route_status`.
+- **Refresh-proof state** - refreshing the page keeps the connection, the
+  simulated location (marker + coordinates) and the spoof buttons. A
+  "connection lost" banner with one-click reconnect appears if the tunnel
+  drops.
+- **Saved location presets** - the Save button next to the location field
+  stores names in `~/.geoport/locations.json`; the dropdown loads them.
+- **Live activity log** - expand "Activity log" at the bottom of the page to
+  tail `GeoPort.log` in the browser.
+- **Dark mode is the default** (your choice is remembered).
+- **No telemetry** - the `api.geoport.me` phone-home calls are gone.
+- **Localhost-only + optional API token** - the app binds to 127.0.0.1 (the
+  old build listened on 0.0.0.0 with the debug console enabled). Set the
+  `GEOPORT_TOKEN` env var to require a token on mutating API calls.
+- **API + tests** - see `API.md` for the full HTTP API (drive it from
+  scripts/Shortcuts) and `tests/test_smoke.py` (run with `pytest`).
 
 ## App Notes
 - iOS 17 & iOS 18 are supported on both Windows and Mac

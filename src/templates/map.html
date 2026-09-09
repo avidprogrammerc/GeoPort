@@ -258,6 +258,10 @@ body.dark-mode .modal-footer button {
             {{ error_message }}
         </div>
     {% endif %}
+    <div id="tunnelBanner" class="alert alert-danger d-none" role="alert">
+        <strong>Connection to the device was lost.</strong> Location simulation has stopped.
+        <button id="tunnelReconnectBtn" class="btn btn-sm btn-outline-light ms-2" type="button" onclick="tunnelReconnect()">Reconnect</button>
+    </div>
 <p><br></p>
 
 <div class="d-flex flex-column align-items-center flex-md-row container">
@@ -514,6 +518,23 @@ L.leafletMenu = function(a, b) {
     var map = null;
     var marker = null;
 
+    // Optional API token (server-side GEOPORT_TOKEN env var). Attach it to
+    // every same-origin API call so remote/headless callers can authenticate.
+    window.GEOPORT_TOKEN = "{{ api_token }}";
+    (function () {
+        var origFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            try {
+                if (window.GEOPORT_TOKEN && typeof url === 'string' && url.startsWith('/')) {
+                    opts = opts || {};
+                    var headers = Object.assign({}, opts.headers, { 'X-GeoPort-Token': window.GEOPORT_TOKEN });
+                    return origFetch.call(window, url, Object.assign({}, opts, { headers: headers }));
+                }
+            } catch (e) { /* fall through to plain fetch */ }
+            return origFetch.call(window, url, opts);
+        };
+    })();
+
     var connectTextElement = document.getElementById('connectText');
     var rsdDataElement = document.getElementById('rsdData');
     var appVersionNum = "{{ app_version_num }}";
@@ -598,6 +619,153 @@ var velocitySelectVisible = false;
 // Define a global variable to store the time to next point
 var timeToNextPoint = 'N/A';
 var velocitySelect = 'walk';
+
+// ============ Server-side route playback (issue #137) =====================
+// The server walks the route (one RSD session for the whole route); the
+// browser only follows the marker and reports progress.
+let routePlayback = { active: false, holding: false, lastIndex: -1, timer: null };
+
+function routeSpeedKmh() {
+    var speeds = { walk: 6, run: 12, ride: 20, drive: 50 };
+    return speeds[velocitySelect] || 6;
+}
+
+function startRoutePolling() {
+    stopRoutePolling();
+    routePlayback.timer = setInterval(pollRouteStatus, 1000);
+    pollRouteStatus();
+}
+
+function stopRoutePolling() {
+    if (routePlayback.timer) { clearInterval(routePlayback.timer); routePlayback.timer = null; }
+}
+
+function pollRouteStatus() {
+    fetch('/route_status').then(r => r.json()).then(st => {
+        if (!st.active) {
+            stopRoutePolling();
+            routePlayback.active = false;
+            var done = st.finished && !st.error;
+            if (st.error) {
+                displayToast('Route error: ' + st.error);
+            } else if (st.finished) {
+                displayToast('Route complete');
+            }
+            routePlayback.holding = false;
+            wasPlaybackPaused = false;
+            isPlaybackStopped = true;
+            if (typeof playbackButton !== 'undefined' && playbackButton) { playbackButton.state('play'); }
+            return;
+        }
+        if (st.current && st.index > routePlayback.lastIndex) {
+            routePlayback.lastIndex = st.index;
+            if (!gpxMarker || !map.hasLayer(gpxMarker)) {
+                gpxMarker = L.marker([st.current.lat, st.current.lng], { icon: orangeIcon }).addTo(drawnItems);
+            } else {
+                gpxMarker.setLatLng([st.current.lat, st.current.lng]);
+            }
+            map.fire('playbackchange');
+        }
+    }).catch(() => {});
+}
+
+// On page load: a route may already be walking server-side (e.g. after a
+// page refresh mid-route).
+function restoreRouteState() {
+    fetch('/route_status').then(r => r.json()).then(st => {
+        if (st.active && st.points > 0) {
+            isPlaybackStopped = false;
+            wasPlaybackPaused = false;
+            routePlayback.active = true;
+            routePlayback.lastIndex = st.index;
+            if (typeof playbackButton !== 'undefined' && playbackButton) { playbackButton.state('pause'); }
+            startRoutePolling();
+        } else if (st.paused) {
+            wasPlaybackPaused = true;
+            routePlayback.holding = true;
+            routePlayback.lastIndex = st.index;
+        }
+    }).catch(() => {});
+}
+
+// ============ Watchdog: tunnel-lost banner =================================
+function pollHealth() {
+    fetch('/health').then(r => r.json()).then(h => {
+        var banner = document.getElementById('tunnelBanner');
+        if (!banner) return;
+        var lost = h.connected && !h.tunnel_ok && !h.location_active && !h.route_active;
+        banner.classList.toggle('d-none', !lost);
+    }).catch(() => {});
+}
+
+function tunnelReconnect() {
+    var dd = document.getElementById('device');
+    if (dd) { dd.disabled = false; }
+    connectDevice();
+}
+
+// ============ Saved location presets =======================================
+function loadSavedLocations() {
+    var sel = document.getElementById('savedLocations');
+    if (!sel) return;
+    fetch('/locations').then(r => r.json()).then(items => {
+        sel.innerHTML = '<option value="">Saved locations…</option>';
+        (items || []).forEach(it => {
+            var o = document.createElement('option');
+            o.value = it.lat + ',' + it.lng;
+            o.textContent = it.name;
+            sel.appendChild(o);
+        });
+    }).catch(() => {});
+}
+
+function applySavedLocation() {
+    var sel = document.getElementById('savedLocations');
+    if (!sel || !sel.value) return;
+    var parts = sel.value.split(',');
+    setCoordinates(parseFloat(parts[0]), parseFloat(parts[1]));
+}
+
+function saveCurrentLocation() {
+    var coords = (document.getElementById('coordinates').value || '').trim();
+    if (!coords) { displayToast('Set a location first'); return; }
+    var parts = coords.split(',');
+    var lat = parseFloat(parts[0]);
+    var lng = parseFloat(parts[parts.length - 1]);
+    if (!isFinite(lat) || !isFinite(lng)) { displayToast('Invalid coordinates'); return; }
+    var name = prompt('Name this location:', 'New location');
+    if (!name) return;
+    fetch('/locations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, lat: lat, lng: lng })
+    }).then(r => r.json())
+      .then(() => { displayToast('Saved "' + name + '"'); loadSavedLocations(); })
+      .catch(() => displayToast('Could not save location'));
+}
+
+// ============ Live activity log ============================================
+var activityLogTimer = null;
+function pollActivityLog() {
+    fetch('/log_tail?lines=40').then(r => r.text()).then(t => {
+        var el = document.getElementById('activityLog');
+        if (el) { el.textContent = t; el.scrollTop = el.scrollHeight; }
+    }).catch(() => {});
+}
+
+function wireActivityLog() {
+    var panel = document.getElementById('activityLogPanel');
+    if (!panel) return;
+    panel.addEventListener('toggle', function () {
+        if (panel.open && !activityLogTimer) {
+            pollActivityLog();
+            activityLogTimer = setInterval(pollActivityLog, 5000);
+        } else if (!panel.open && activityLogTimer) {
+            clearInterval(activityLogTimer);
+            activityLogTimer = null;
+        }
+    });
+}
 let isDrawingMode = false; // Flag to track drawing mode
 
 
@@ -896,43 +1064,66 @@ var playbackButton = L.easyButton({
         icon: '<i class="lni lni-play"></i>', // Icon class for play state
         title: 'GPX Playback', // Tooltip for the button
         onClick: function(btn, map) {
-            // Start GPX playback
-            console.log("play click");
-            console.log("isPlaybackStopped: ", isPlaybackStopped);
-            if (!isPlaybackStopped) {
-                console.log("play if");
+            // Start server-side route playback (the server walks the route;
+            // no more per-point /set_location churn in the browser).
+            console.log("play click (server-side)");
+            if (!isPlaybackStopped || routePlayback.active) {
                 return; // Prevent multiple playbacks
             }
 
-            isPlaybackStopped = false; // Set playback status to active
-            console.log("before playback");
-
-            // If playback was paused, resume from the current position
-            if (wasPlaybackPaused) {
-                processNextPoint();
-            } else {
-                playbackIndex = 0; // Reset playback index
-                processNextPoint(); // Start processing points from the beginning
+            var pts = (typeof lineLatLngs !== 'undefined' && lineLatLngs) ? lineLatLngs : [];
+            if (pts.length < 2) {
+                displayToast('Load a GPX route first');
+                return;
             }
 
-            // Change button state to pause
-            btn.state('pause');
+            isPlaybackStopped = false; // Set playback status to active
+
+            // If playback was paused, resume from where the server stopped
+            var startIndex = (wasPlaybackPaused && routePlayback.lastIndex >= 0) ? routePlayback.lastIndex + 1 : 0;
+            if (startIndex >= pts.length) { startIndex = 0; }
+            wasPlaybackPaused = false;
+
+            fetch('/route_start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ points: pts, speed_kmh: routeSpeedKmh(), start_index: startIndex })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    displayToast('Route failed: ' + data.error);
+                    isPlaybackStopped = true;
+                    return;
+                }
+                routePlayback.active = true;
+                routePlayback.holding = false;
+                routePlayback.lastIndex = startIndex - 1;
+                btn.state('pause');
+                displayToast('Walking route at ' + routeSpeedKmh() + ' km/h (' + pts.length + ' points)');
+                startRoutePolling();
+            })
+            .catch(e => { displayToast('Route start failed: ' + e); isPlaybackStopped = true; });
         }
     }, {
         stateName: 'pause',
         icon: '<i class="lni lni-pause"></i>', // Icon class for pause state
         title: 'Pause GPX Playback', // Tooltip for the button
         onClick: function(btn, map) {
-            // Pause GPX playback
-            isPlaybackStopped = !isPlaybackStopped; // Toggle playback status
-            if (isPlaybackStopped) {
-                console.log('Playback paused');
-                wasPlaybackPaused = true; // Set flag indicating playback was paused
-            } else {
-                console.log('Playback resumed');
-                wasPlaybackPaused = false; // Reset flag indicating playback was not paused
-                processNextPoint(); // Resume processing if playback is resumed
-            }
+            // Pause server-side playback (the last point stays spoofed)
+            isPlaybackStopped = true; // Toggle playback status
+            wasPlaybackPaused = true; // Set flag indicating playback was paused
+            routePlayback.holding = true;
+            stopRoutePolling();
+
+            fetch('/route_stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hold: true })
+            })
+            .then(r => r.text())
+            .then(() => displayToast('Route paused - location held'))
+            .catch(e => displayToast('Pause failed: ' + e));
 
             // Change button state back to play
             btn.state('play');
@@ -2248,6 +2439,10 @@ async function updateFuelText(selectedFuelType, selectedFuelRegion) {
     var fuelText = document.getElementById('fuelText');
     var fuelDataCollapse = document.getElementById('fuelDataCollapse');
     try {
+        if (!selectedFuelType) {
+            // Fuel API still loading / no type selected yet - don't 404.
+            return;
+        }
         const response = await fetch(`/api/data/${selectedFuelType}?region=${selectedFuelRegion}`);
         const fuelTypeData = await response.json();
         fuelText.value = `
@@ -2316,7 +2511,9 @@ function setLocationArrows() {
     }
 
     function stopLocation(showToast = true) {
-        fetch('/stop_location', {
+        // If a route is playing (or paused/holding), stop that instead.
+        var endpoint = (routePlayback.active || routePlayback.holding) ? '/route_stop' : '/stop_location';
+        fetch(endpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -2326,13 +2523,16 @@ function setLocationArrows() {
             .then(response => response.text())
             .then(data => {
                 activeSpoofLocation = null;
+                routePlayback.active = false;
+                routePlayback.holding = false;
+                stopRoutePolling();
                 try { localStorage.removeItem('geoportLastSpoof'); } catch (e) {}
                 updateSetLocationButtonStatus();
                 updateStopLocationButtonStatus();
                 if (showToast) {
                     displayToast(data); // Display response as a toast
                 }
-                console.log('stop_location response:', data);
+                console.log(endpoint + ' response:', data);
             })
             .catch(error => {
                 console.error('Error stopping location:', error);
@@ -2542,6 +2742,11 @@ function continueAfterDeveloperModeRequired() {
     console.log("test");
     initializeMap();
     handleFuelTypeChange();
+    loadSavedLocations();
+    restoreRouteState();
+    wireActivityLog();
+    pollHealth();
+    setInterval(pollHealth, 5000);
     document.getElementById('rsdData').addEventListener('change', updateSetLocationButtonStatus);
     document.getElementById('coordinates').addEventListener('input', updateSetLocationButtonStatus);
     populateDeviceList();
@@ -2585,6 +2790,14 @@ function continueAfterDeveloperModeRequired() {
         </div>
         <div class="col-md-auto">
             <button type="button" class="btn btn-primary" id="search" onclick="handleSearch()">Search</button>
+        </div>
+        <div class="col-md-auto">
+            <select class="form-select form-select-sm" id="savedLocations" title="Saved locations" onchange="applySavedLocation()" style="width:auto;">
+                <option value="">Saved locations…</option>
+            </select>
+        </div>
+        <div class="col-md-auto">
+            <button type="button" class="btn btn-outline-secondary" id="saveLocationBtn" onclick="saveCurrentLocation()" title="Save the current location as a preset">Save</button>
         </div>
     </div>
 </div>
@@ -2786,6 +2999,11 @@ Feedback? Please see the <a href="https://www.surveymonkey.com/r/5LJR2M5" target
 
 </div>
 
+<!-- Live activity log -->
+<details id="activityLogPanel" class="container mb-4">
+    <summary style="cursor:pointer; font-weight:500;">Activity log (live, from GeoPort.log)</summary>
+    <pre id="activityLog" style="background:#0d1117;color:#7ee787;padding:8px;height:220px;overflow:auto;font-size:11px;border-radius:6px;"></pre>
+</details>
 </body>
 
 </html>

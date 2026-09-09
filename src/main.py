@@ -1,4 +1,6 @@
 import locale
+import json
+import math
 import os
 import re
 import sys
@@ -17,7 +19,7 @@ import subprocess
 import pycountry
 from logging.handlers import RotatingFileHandler
 
-from flask import Flask, jsonify, make_response, render_template, request
+from flask import Flask, jsonify, make_response, render_template, request, Response
 from urllib3.exceptions import InsecureRequestWarning, ConnectionError
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 from contextlib import asynccontextmanager
@@ -84,8 +86,8 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # Also write logs to a rotating file so "it just stopped working" reports can
 # be debugged offline (issues #148/#172/#174 have no console output available).
+log_file_path = os.path.join(os.getcwd(), 'GeoPort.log')
 try:
-    log_file_path = os.path.join(os.getcwd(), 'GeoPort.log')
     file_handler = RotatingFileHandler(log_file_path, maxBytes=2_000_000, backupCount=3)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
@@ -146,6 +148,26 @@ location_threads = []
 tunnel_thread = None
 location_thread = None
 connect_attempt_lock = threading.Lock()
+# --- Server-side route playback (GPX/route walker) ---------------------------
+# Replaces the old browser-driven playback (a setTimeout per point, each of
+# which POSTed /set_location and re-spawned the location thread). The server
+# holds ONE RSD/DVT session open for the whole route and walks it at a
+# constant speed (issue #137).
+route_points = []            # list of (lat, lng)
+route_speed_kmh = 5.0
+route_index = -1
+route_generation = 0
+route_resume_start = 0
+route_active = False
+route_paused = False
+route_finished = False
+route_error = None
+route_thread = None
+terminate_route_thread = False
+route_state_lock = threading.Lock()
+
+# --- Optional API token for remote/headless use (set GEOPORT_TOKEN env) ----
+GEOPORT_TOKEN = os.environ.get('GEOPORT_TOKEN', '')
 timeout = DEFAULT_BONJOUR_TIMEOUT
 
 # Get the current platform using sys.platform
@@ -1261,6 +1283,7 @@ def set_location():
             latitude, longitude = location.split()
 
             #asyncio.run(set_location_thread(latitude, longitude))
+            stop_route_thread_internal(hold=False)  # a manual set wins over any route
             start_set_location_thread(latitude, longitude)
 
             return 'Location set successfully'
@@ -1272,6 +1295,7 @@ def set_location():
 
             mount_developer_image()
             #asyncio.run(set_location_thread(latitude, longitude))
+            stop_route_thread_internal(hold=False)  # a manual set wins over any route
             start_set_location_thread(latitude, longitude)
 
 
@@ -1290,49 +1314,338 @@ def set_location():
 async def stop_location():
     try:
         stop_set_location_thread()
+        stop_route_thread_internal(hold=False)  # a manual stop wins over any route
         global rsd_data
-        global rsd_host
-        global rsd_port
-        global lockdown
-        global ios_version, udid, connection_type
         global location
         # Drop the remembered location so a page refresh after stopping
         # doesn't resurrect the stale "spoofing" UI state.
         location = None
         logger.info(f"stop set location data:  {rsd_data}")
-
-        cached = get_cached_rsd_data()
-
-        if ios_version is not None and is_major_version_17_or_greater(ios_version):
-            if cached is not None:
-                rsd_host = cached['host']
-                rsd_port = cached['port']
-
-            # Nothing to clear on the device if the tunnel is gone - the
-            # location loop has already been stopped above.
-            if rsd_host is None or rsd_port is None or not is_tunnel_endpoint_active(rsd_host, rsd_port):
-                logger.warning("No active tunnel - skipping on-device location clear")
-                return 'Location cleared successfully'
-
-            async with RemoteServiceDiscoveryService((rsd_host, rsd_port)) as sp_rsd:
-                with DvtSecureSocketProxyService(sp_rsd) as dvt:
-                    LocationSimulation(dvt).clear()
-                    logger.warning("Location Cleared Successfully")
-            return 'Location cleared successfully'
-
-        elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
-            if lockdown is None:
-                logger.warning("No lockdown connection - skipping on-device location clear")
-                return 'Location cleared successfully'
-
-            with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
-                LocationSimulation(dvt).clear()
-                logger.warning("Location Cleared Successfully")
-            return 'Location cleared successfully'
+        await clear_device_location()
         return 'Location cleared successfully'
     except Exception as e:
         error_message = str(e)
         return jsonify({'error': error_message})
+
+
+# --- Server-side route playback ------------------------------------------------
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    """Great-circle distance in meters."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+async def _route_walk(sim, gen):
+    """Walk the queued route at the configured speed. Runs in the route
+    thread's event loop with one open DVT session for the whole route.
+    Sleeping in small slices keeps Stop/Pause responsive."""
+    global route_index, location
+    points = list(route_points)
+    speed = max(0.5, min(250.0, float(route_speed_kmh)))
+    start = max(0, min(len(points) - 1, route_resume_start))
+    try:
+        sim.clear()
+    except Exception as e:
+        logger.warning(f"Could not clear previous location before route: {e}")
+    for i in range(start, len(points)):
+        if terminate_route_thread or route_generation != gen:
+            break
+        lat, lng = points[i]
+        sim.set(lat, lng)
+        location = f"{lat} {lng}"  # keep /connection_status fresh mid-route
+        route_index = i
+        if i < len(points) - 1:
+            nxt = points[i + 1]
+            dwell = haversine_m(lat, lng, nxt[0], nxt[1]) / (speed / 3.6)
+        else:
+            dwell = 10.0  # brief hold on the final point
+        end = time.time() + dwell
+        while time.time() < end and not terminate_route_thread and route_generation == gen:
+            await asyncio.sleep(0.25)
+    if not terminate_route_thread and route_generation == gen:
+        # Natural finish: restore the device's real location.
+        try:
+            sim.clear()
+        except Exception:
+            pass
+        location = None
+
+
+async def route_playback_worker():
+    global route_error, route_active, route_finished
+    gen = route_generation
+    try:
+        if ios_version is not None and is_major_version_17_or_greater(ios_version):
+            ensure_active_rsd_connection()
+            rsd = get_cached_rsd_data()
+            if rsd is None:
+                raise RuntimeError("No active tunnel - connect the device first")
+            async with RemoteServiceDiscoveryService((rsd['host'], rsd['port'])) as sp_rsd:
+                with DvtSecureSocketProxyService(sp_rsd) as dvt:
+                    await _route_walk(LocationSimulation(dvt), gen)
+        elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
+            if lockdown is None:
+                raise RuntimeError("No active device connection")
+            with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
+                await _route_walk(LocationSimulation(dvt), gen)
+        else:
+            raise RuntimeError("No iOS version present - connect a device first")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        route_error = str(e)
+        route_finished = True
+        logger.error(f"Route playback error: {e}")
+    finally:
+        if route_generation == gen:
+            route_active = False
+
+
+def stop_route_thread_internal(hold=False):
+    """Stop the route worker. hold=True keeps the last point spoofed (pause)."""
+    global terminate_route_thread, route_thread, route_active, route_paused, route_finished
+    terminate_route_thread = True
+    if route_thread is not None and route_thread.is_alive():
+        route_thread.join(timeout=3)
+    route_active = False
+    route_paused = bool(hold)
+    route_finished = not hold
+
+
+def start_route_thread():
+    global route_thread, route_generation, terminate_route_thread, route_finished, route_error
+    stop_route_thread_internal(hold=False)
+    route_generation += 1
+    terminate_route_thread = False
+    route_active = True
+    route_finished = False
+    route_error = None
+    logger.info(f"Starting route playback: {len(route_points)} points @ {route_speed_kmh} km/h from index {route_resume_start}")
+    route_thread = threading.Thread(
+        target=lambda: asyncio.run(route_playback_worker()), daemon=True)
+    route_thread.start()
+
+
+@app.route('/route_start', methods=['POST'])
+def route_start():
+    global route_points, route_speed_kmh, route_resume_start
+    try:
+        data = request.get_json(force=True) or {}
+        raw = data.get('points') or []
+        points = []
+        for p in raw:
+            try:
+                if isinstance(p, dict):
+                    points.append((float(p['lat']), float(p['lng'])))
+                elif isinstance(p, (list, tuple)) and len(p) == 2:
+                    points.append((float(p[0]), float(p[1])))
+                else:
+                    return jsonify({'error': 'invalid point format'}), 400
+            except (TypeError, ValueError, KeyError):
+                return jsonify({'error': 'invalid point format'}), 400
+        if len(points) < 2:
+            return jsonify({'error': 'need at least 2 route points'}), 400
+        try:
+            speed = float(data.get('speed_kmh', 5.0))
+        except (TypeError, ValueError):
+            speed = 5.0
+        if not (0.5 <= speed <= 250):
+            return jsonify({'error': 'speed_kmh must be between 0.5 and 250'}), 400
+        try:
+            start_index = int(data.get('start_index', 0))
+        except (TypeError, ValueError):
+            start_index = 0
+        if not (0 <= start_index < len(points)):
+            return jsonify({'error': 'start_index out of range'}), 400
+        if udid is None:
+            return jsonify({'error': 'connect a device first'}), 400
+        with route_state_lock:
+            route_points = points
+            route_speed_kmh = speed
+            route_resume_start = start_index
+        stop_set_location_thread()  # the route takes over from any point spoof
+        start_route_thread()
+        return jsonify({'ok': True, 'points': len(points), 'speed_kmh': speed, 'start_index': start_index})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/route_stop', methods=['POST'])
+async def route_stop():
+    """Stop (and clear) the route, or pause it (hold=1 keeps the last point)."""
+    global location
+    try:
+        data = request.get_json(silent=True) or {}
+        hold = bool(data.get('hold', False))
+        stop_route_thread_internal(hold=hold)
+        if hold:
+            return 'Route paused (location held)'
+        location = None
+        await clear_device_location()
+        return 'Route stopped'
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/route_status')
+def route_status():
+    total = len(route_points)
+    cur = None
+    if total and 0 <= route_index < total:
+        cur = {'lat': route_points[route_index][0], 'lng': route_points[route_index][1]}
+    progress = ((route_index + 1) / total) if total and route_index >= 0 else 0.0
+    return jsonify({
+        'active': route_active,
+        'paused': route_paused,
+        'finished': route_finished,
+        'error': route_error,
+        'points': total,
+        'index': route_index,
+        'progress': round(min(1.0, progress), 4),
+        'speed_kmh': route_speed_kmh,
+        'current': cur,
+    })
+
+
+async def clear_device_location():
+    """Clear the spoofed location on the device (best effort)."""
+    global rsd_host, rsd_port
+    cached = get_cached_rsd_data()
+    if ios_version is not None and is_major_version_17_or_greater(ios_version):
+        if cached is not None:
+            rsd_host = cached['host']
+            rsd_port = cached['port']
+        if rsd_host is None or rsd_port is None or not is_tunnel_endpoint_active(rsd_host, rsd_port):
+            logger.warning("No active tunnel - skipping on-device location clear")
+            return
+        async with RemoteServiceDiscoveryService((rsd_host, rsd_port)) as sp_rsd:
+            with DvtSecureSocketProxyService(sp_rsd) as dvt:
+                LocationSimulation(dvt).clear()
+                logger.warning("Location Cleared Successfully")
+    elif ios_version is not None and not is_major_version_17_or_greater(ios_version):
+        if lockdown is None:
+            return
+        with DvtSecureSocketProxyService(lockdown=lockdown) as dvt:
+            LocationSimulation(dvt).clear()
+            logger.warning("Location Cleared Successfully")
+
+
+# --- Health / watchdog ---------------------------------------------------------
+
+@app.route('/health')
+def health():
+    """Lightweight status polled by the UI watchdog banner."""
+    tunnel_ok = False
+    try:
+        cached = get_cached_rsd_data()
+        if ios_version is not None and is_major_version_17_or_greater(ios_version):
+            tunnel_ok = cached is not None and is_tunnel_endpoint_active(cached.get('host'), cached.get('port'))
+        else:
+            tunnel_ok = cached is not None and lockdown is not None
+    except Exception:
+        tunnel_ok = False
+    return jsonify({
+        'connected': bool(udid),
+        'tunnel_ok': bool(tunnel_ok),
+        'location_active': bool(location_thread is not None and location_thread.is_alive()),
+        'route_active': bool(route_active),
+        'route_paused': bool(route_paused),
+        'route_error': route_error,
+    })
+
+
+# --- Saved location presets (~/.geoport/locations.json) -------------------------
+
+def _locations_path():
+    d = os.path.join(home_dir, '.geoport')
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, 'locations.json')
+
+
+def _load_locations():
+    try:
+        with open(_locations_path(), encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_locations(items):
+    with open(_locations_path(), 'w', encoding='utf-8') as f:
+        json.dump(items, f, indent=2)
+
+
+@app.route('/locations', methods=['GET'])
+def get_saved_locations():
+    return jsonify(_load_locations())
+
+
+@app.route('/locations', methods=['POST'])
+def save_location_preset():
+    data = request.get_json(force=True) or {}
+    name = str(data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    try:
+        lat, lng = float(data['lat']), float(data['lng'])
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'error': 'valid name/lat/lng required'}), 400
+    items = [i for i in _load_locations() if i.get('name') != name]
+    items.append({'name': name, 'lat': lat, 'lng': lng})
+    try:
+        _save_locations(items)
+    except Exception as e:
+        return jsonify({'error': f'could not save: {e}'}), 500
+    return jsonify(items)
+
+
+@app.route('/locations/<path:name>', methods=['DELETE'])
+def delete_location_preset(name):
+    items = [i for i in _load_locations() if i.get('name') != name]
+    _save_locations(items)
+    return jsonify(items)
+
+
+# --- Live activity log ----------------------------------------------------------
+
+@app.route('/log_tail')
+def log_tail():
+    try:
+        n = min(max(int(request.args.get('lines', 40)), 1), 200)
+    except ValueError:
+        n = 40
+    try:
+        with open(log_file_path, encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()[-n:]
+        return Response(''.join(lines), mimetype='text/plain')
+    except Exception as e:
+        return Response(f'log unavailable: {e}', mimetype='text/plain', status=500)
+
+
+# --- Optional API token (GEOPORT_TOKEN) ----------------------------------------
+
+_PUBLIC_GET_PATHS = {'/', '/connection_status', '/health', '/route_status',
+                     '/log_tail', '/locations', '/list_devices', '/api/fuel_types'}
+
+
+@app.before_request
+def _check_api_token():
+    if not GEOPORT_TOKEN:
+        return None
+    if request.method in ('GET', 'HEAD') and request.path in _PUBLIC_GET_PATHS:
+        return None
+    provided = request.headers.get('X-GeoPort-Token') or request.args.get('token', '')
+    if provided != GEOPORT_TOKEN:
+        return jsonify({'error': 'unauthorized'}), 401
+    return None
 
 
 def get_github_version():
@@ -1610,7 +1923,7 @@ def index():
     resp = make_response(render_template('map.html', version_message=None, github_broadcast=None,
                                          user_locale=user_locale, app_version_num=APP_VERSION_NUMBER,
                                          app_version_type=APP_VERSION_TYPE, error_message=error_message, current_platform=platform,
-                                         sudo_message=sudo_message))
+                                         sudo_message=sudo_message, api_token=GEOPORT_TOKEN))
     # Never serve a stale control-panel page from browser cache - the UI
     # state (connection, spoof location) is only meaningful when fresh.
     resp.headers['Cache-Control'] = 'no-store'
@@ -1685,7 +1998,10 @@ if __name__ == '__main__':
 
     #threading.Thread(target=open_browser).start()
 
-    app.run(debug=True, use_reloader=False, port=chosen_port, host='0.0.0.0')
+    # Bind to localhost only and never run the debug console: this is a
+    # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
+    # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.
+    app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
 
 
 
