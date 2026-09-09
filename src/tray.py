@@ -41,6 +41,18 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
     # time the user opens it).
     status = {"line": "starting…"}
 
+    # Left-clicking the tray icon invokes the menu's *default* item; a
+    # double-click sends two clicks back-to-back (two WM_LBUTTONUPs). Throttle
+    # so single and double clicks both open the UI exactly once.
+    last_open = {"t": 0.0}
+
+    def _open_ui(icon, item=None):
+        now = time.monotonic()
+        if now - last_open["t"] < 2.5:
+            return
+        last_open["t"] = now
+        webbrowser.open(url)
+
     def _quit(icon, item):
         threading.Thread(target=icon.stop, daemon=True).start()
         try:
@@ -50,7 +62,7 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
 
     def _build_menu():
         return (
-            pystray.MenuItem("Open GeoPort", lambda icon, item: webbrowser.open(url)),
+            pystray.MenuItem("Open GeoPort", _open_ui, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(status["line"], lambda icon, item: None, enabled=False),
             pystray.Menu.SEPARATOR,
