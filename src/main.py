@@ -74,10 +74,15 @@ import logging
 
 
 # Get or create a logger instance named "GeoPort"
+# Guard: under pythonw.exe (e.g. a double-clicked .pyw) sys.stderr is None and
+# a bare StreamHandler() would crash the process on the first log line.
+_log_handlers = []
+if sys.stderr is not None:
+    _log_handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=_log_handlers
 )
 
 # Create a logger named "GeoPort"
