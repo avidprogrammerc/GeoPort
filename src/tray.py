@@ -36,18 +36,10 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
     if not _HAS_TRAY:
         return None
 
-    status_item = pystray.Menu.Item("starting…", lambda icon, item: None, enabled=False)
-
-    def _refresh():
-        try:
-            tooltip, line = get_state()
-        except Exception:
-            tooltip, line = title, "error reading status"
-        status_item.text = line
-        try:
-            icon.title = tooltip
-        except Exception:
-            pass
+    # MenuItem.text is read-only in pystray 0.19.x, so the status line is
+    # refreshed by rebuilding the menu (the backend re-reads icon.menu each
+    # time the user opens it).
+    status = {"line": "starting…"}
 
     def _quit(icon, item):
         threading.Thread(target=icon.stop, daemon=True).start()
@@ -56,18 +48,28 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
         except Exception:
             pass
 
-    icon = pystray.Icon(
-        "geoport",
-        _make_icon(),
-        title,
-        (
-            pystray.Menu.Item("Open GeoPort", lambda icon, item: webbrowser.open(url)),
+    def _build_menu():
+        return (
+            pystray.MenuItem("Open GeoPort", lambda icon, item: webbrowser.open(url)),
             pystray.Menu.SEPARATOR,
-            status_item,
+            pystray.MenuItem(status["line"], lambda icon, item: None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.Menu.Item("Quit", _quit),
-        ),
-    )
+            pystray.MenuItem("Quit", _quit),
+        )
+
+    icon = pystray.Icon("geoport", _make_icon(), title, _build_menu())
+
+    def _refresh():
+        try:
+            tooltip, line = get_state()
+        except Exception:
+            tooltip, line = title, "error reading status"
+        status["line"] = line
+        try:
+            icon.title = tooltip
+            icon.menu = _build_menu()
+        except Exception:
+            pass
 
     def _runner():
         _refresh()
