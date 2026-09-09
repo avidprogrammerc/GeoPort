@@ -1998,6 +1998,26 @@ if __name__ == '__main__':
 
     #threading.Thread(target=open_browser).start()
 
+    # System tray icon (best effort - the app runs fine without one).
+    def _tray_state():
+        if route_active:
+            line = f"Walking route: point {max(route_index, 0) + 1}/{len(route_points)}"
+        elif route_paused:
+            line = "Route paused (location held)"
+        elif location_thread is not None and location_thread.is_alive():
+            line = "Spoofing location"
+        elif udid is not None:
+            line = "Device connected"
+        else:
+            line = "No device connected"
+        return "GeoPort", line
+
+    try:
+        import tray as geoport_tray
+        geoport_tray.start_tray(_tray_state, f"http://localhost:{chosen_port}", shutdown_server)
+    except Exception as e:
+        logger.warning(f"Tray icon unavailable: {e}")
+
     # Bind to localhost only and never run the debug console: this is a
     # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
     # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.

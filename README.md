@@ -132,6 +132,9 @@ that one is busy). A few extra switches are available:
 - **Live activity log** - expand "Activity log" at the bottom of the page to
   tail `GeoPort.log` in the browser.
 - **Dark mode is the default** (your choice is remembered).
+- **System tray icon** - a map-pin in the notification area shows live
+  status (connected / spoofing / walking route), with *Open GeoPort* and
+  *Quit* (best effort: `pystray` is optional at runtime).
 - **No telemetry** - the `api.geoport.me` phone-home calls are gone.
 - **Localhost-only + optional API token** - the app binds to 127.0.0.1 (the
   old build listened on 0.0.0.0 with the debug console enabled). Set the
