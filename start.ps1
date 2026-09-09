@@ -63,9 +63,8 @@ for ($i = 0; $i -lt 30; $i++) {
 }
 
 if ($ok) {
-    Log "port is up - opening browser"
+    Log "port is up (main.py opens the browser itself - don't open it again here)"
     Write-Host "GeoPort is up: http://localhost:$port"
-    Start-Process "http://localhost:$port"
 } else {
     $alive = (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) -ne $null
     Log ("port NOT up after 60s (python alive? {0})" -f $alive)
