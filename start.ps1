@@ -32,10 +32,11 @@ if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyCon
     exit 0
 }
 
-# pythonw = no console window at all. The app self-elevates via UAC (pyuac)
-# and writes its log to <repo>\GeoPort.log.
+# pythonw = no console window at all. When launched via GeoPort.bat the
+# process is already elevated, so pyuac's self-relaunch is a no-op; the
+# app log is <repo>\GeoPort.log.
 Start-Process -FilePath $pyw -ArgumentList 'src\main.py' -WorkingDirectory $repo -WindowStyle Hidden
-Write-Host "Starting GeoPort (a UAC prompt will appear once)..."
+Write-Host "Starting GeoPort..."
 
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {

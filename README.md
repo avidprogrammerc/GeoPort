@@ -99,9 +99,11 @@ python src/main.py
 ```
 
 **Python 3.10 – 3.12 required** (3.13 is not supported yet: the `lzfse` C
-extension has no cp313 Windows wheel). On Windows, `start.ps1` does all of
-the above in one click: it creates `.\.venv` on first run (using `uv` if
-you have it), launches the app with no console window, and opens the UI.
+extension has no cp313 Windows wheel). On Windows, double-click **`GeoPort.bat`** for the one-click experience:
+if GeoPort is already running it just reopens the browser; otherwise one
+UAC prompt starts it with no console window (a map-pin tray icon appears
+and your browser opens when ready). `start.ps1` does the same from a
+terminal (it creates `.\.venv` on first run, using `uv` if you have it).
 
 The web UI opens at `http://localhost:54321` (a random high port is used if
 that one is busy). A few extra switches are available:
