@@ -10,7 +10,6 @@
 $ErrorActionPreference = 'Stop'
 $repo  = $PSScriptRoot
 $py    = Join-Path $repo '.venv\Scripts\python.exe'
-$pyw   = Join-Path $repo '.venv\Scripts\pythonw.exe'
 $port  = 54321
 
 if (-not (Test-Path $py)) {
@@ -32,9 +31,13 @@ if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyCon
     exit 0
 }
 
-# pythonw = no console window at all. When launched via GeoPort.bat the
-# process is already elevated, so pyuac's self-relaunch is a no-op; the
-# app log is <repo>\GeoPort.log.
+# Prefer pythonw (no console window at all). uv-created venvs don't ship
+# pythonw.exe, so fall back to python.exe in a hidden console - visually the
+# same (the app logs to <repo>\GeoPort.log either way). When launched via
+# GeoPort.bat the process is already elevated, so pyuac's self-relaunch is a
+# no-op.
+$pyw = Join-Path $repo '.venv\Scripts\pythonw.exe'
+if (-not (Test-Path $pyw)) { $pyw = $py }
 Start-Process -FilePath $pyw -ArgumentList 'src\main.py' -WorkingDirectory $repo -WindowStyle Hidden
 Write-Host "Starting GeoPort..."
 
