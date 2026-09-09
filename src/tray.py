@@ -61,7 +61,12 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
             pass
 
     def _build_menu():
-        return (
+        # Must be a pystray.Menu instance, not a bare tuple: the menu
+        # property stores the value as-is, and left-clicks invoke the stored
+        # menu object (Menu.__call__ -> default item). A tuple is not
+        # callable, which made left/double-clicks die with a swallowed
+        # TypeError.
+        return pystray.Menu(
             pystray.MenuItem("Open GeoPort", _open_ui, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(status["line"], lambda icon, item: None, enabled=False),
