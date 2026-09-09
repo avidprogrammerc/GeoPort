@@ -105,6 +105,10 @@ UAC prompt starts it with no console window (a map-pin tray icon appears
 and your browser opens when ready). `start.ps1` does the same from a
 terminal (it creates `.\.venv` on first run, using `uv` if you have it).
 
+**Taskbar:** Windows won't pin `.bat` shortcuts, so `GeoPort.exe` (a tiny
+launcher stub that just runs the .bat) is the pinnable target - the desktop
+shortcut points at it. Rebuild with PyInstaller (see `launcher_stub.py` header).
+
 The web UI opens at `http://localhost:54321` (a random high port is used if
 that one is busy). A few extra switches are available:
 

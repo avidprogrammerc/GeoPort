@@ -6,3 +6,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 saved_locations.json
+
+# launcher stub build artifacts
+GeoPort.exe
+build-py/
+launcher-dist/
+.venv/
