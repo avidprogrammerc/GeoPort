@@ -12,3 +12,4 @@ GeoPort.exe
 build-py/
 launcher-dist/
 .venv/
+launcher_trace.log

@@ -12,6 +12,12 @@ $repo  = $PSScriptRoot
 $py    = Join-Path $repo '.venv\Scripts\python.exe'
 $port  = 54321
 
+$trace = Join-Path $repo 'launcher_trace.log'
+function Log($m) { Add-Content -Path $trace -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$elevated = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Log ("start.ps1 begin (PID {0}, elevated={1})" -f $PID, $elevated)
+
 if (-not (Test-Path $py)) {
     Write-Host "First run: creating .venv and installing dependencies (can take a few minutes)..."
     if (Get-Command uv -ErrorAction SilentlyContinue) {
@@ -31,14 +37,20 @@ if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyCon
     exit 0
 }
 
-# Prefer pythonw (no console window at all). uv-created venvs don't ship
-# pythonw.exe, so fall back to python.exe in a hidden console - visually the
-# same (the app logs to <repo>\GeoPort.log either way). When launched via
-# GeoPort.bat the process is already elevated, so pyuac's self-relaunch is a
-# no-op.
-$pyw = Join-Path $repo '.venv\Scripts\pythonw.exe'
-if (-not (Test-Path $pyw)) { $pyw = $py }
-Start-Process -FilePath $pyw -ArgumentList 'src\main.py' -WorkingDirectory $repo -WindowStyle Hidden
+# Launch python.exe in a hidden console: -WindowStyle Hidden shows no window
+# at all, so it is visually identical to pythonw. Deliberately NOT pythonw.exe:
+# there sys.stderr is None, which used to crash the app's logging on the first
+# log line (src/main.py now guards against this, but python.exe is the
+# proven path).
+$pyw = $py
+try {
+Log ("launching: $pyw (hidden)")
+    $proc = Start-Process -FilePath $pyw -ArgumentList 'src\main.py' -WorkingDirectory $repo -WindowStyle Hidden -PassThru
+    Log ("Start-Process returned: PID {0}" -f $proc.Id)
+} catch {
+    Log ("Start-Process FAILED: $($_.Exception.Message)")
+    throw
+}
 Write-Host "Starting GeoPort..."
 
 $ok = $false
@@ -51,8 +63,11 @@ for ($i = 0; $i -lt 30; $i++) {
 }
 
 if ($ok) {
+    Log "port is up - opening browser"
     Write-Host "GeoPort is up: http://localhost:$port"
     Start-Process "http://localhost:$port"
 } else {
+    $alive = (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) -ne $null
+    Log ("port NOT up after 60s (python alive? {0})" -f $alive)
     Write-Warning "GeoPort did not come up in 60s - check GeoPort.log in the repo folder."
 }
