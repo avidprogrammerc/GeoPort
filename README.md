@@ -89,7 +89,7 @@ You will need to install iTunes (we need their USB service so we can discover th
 ## Running from source
 
 Prefer to run the code yourself (or contribute)? The source is fully
-functional and tracks the release behaviour:
+functional and includes the extra features listed below:
 
 ```bash
 git clone https://github.com/davesc63/GeoPort.git
@@ -99,9 +99,7 @@ python src/main.py
 ```
 
 **Python 3.10 – 3.12 required** (3.13 is not supported yet: the `lzfse` C
-extension has no cp313 Windows wheel). On Windows, `start.ps1` does all of
-the above in one click: it creates `.\.venv` on first run (using `uv` if
-you have it), launches the app with no console window, and opens the UI.
+extension has no cp313 Windows wheel).
 
 The web UI opens at `http://localhost:54321` (a random high port is used if
 that one is busy). A few extra switches are available:
