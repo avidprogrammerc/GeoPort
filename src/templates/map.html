@@ -724,7 +724,19 @@ function applySavedLocation() {
     var sel = document.getElementById('savedLocations');
     if (!sel || !sel.value) return;
     var parts = sel.value.split(',');
-    setCoordinates(parseFloat(parts[0]), parseFloat(parts[1]));
+    var lat = parseFloat(parts[0]);
+    var lng = parseFloat(parts[1]);
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    setCoordinates(lat, lng);
+    // Refresh the map view so it points at the loaded location
+    if (typeof map !== 'undefined' && map) {
+        if (!marker) {
+            marker = createMarker([lat, lng]);
+        } else {
+            marker.setLatLng([lat, lng]);
+        }
+        map.setView([lat, lng], 13);
+    }
 }
 
 function saveCurrentLocation() {
