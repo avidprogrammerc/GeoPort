@@ -127,6 +127,7 @@ wifihost = args.wifihost
 wifi_port = None
 connection_type = None
 udid = None
+device_name = None
 lockdown = None
 ios_version = None
 pair_record = None
@@ -603,7 +604,12 @@ def check_developer_mode(udid, connection_type):
 
         logger.warning(f"Check Developer Mode")
 
-        lockdown = create_using_usbmux(udid, connection_type=connection_type, autopair=True)
+        if connection_type in ("Network", "Manual") and wifihost:
+            # Wi-Fi-only device: usbmux can't see it, so use the network
+            # lockdown client (same path as the --wifihost listing)
+            lockdown = create_using_tcp(hostname=wifihost, identifier=udid)
+        else:
+            lockdown = create_using_usbmux(udid, connection_type=connection_type, autopair=True)
 
         result = lockdown.developer_mode_status
         logger.info(f"Developer Mode Check result:  {result}")
@@ -650,11 +656,14 @@ def enable_developer_mode(udid, connection_type):
         pass
         #return False, "No Pair Record Found. Please use a USB cable first to create a pair record"
 
-    lockdown = create_using_usbmux(
-        udid,
-        connection_type=connection_type,
-        autopair=True,
-        pairing_records_cache_folder=home)
+    if connection_type in ("Network", "Manual") and wifihost:
+        lockdown = create_using_tcp(hostname=wifihost, identifier=udid)
+    else:
+        lockdown = create_using_usbmux(
+            udid,
+            connection_type=connection_type,
+            autopair=True,
+            pairing_records_cache_folder=home)
 
 
     try:
@@ -862,12 +871,53 @@ def ensure_active_rsd_connection():
         raise RuntimeError("Unable to establish an active device tunnel")
 
 
+def refresh_device_name():
+    """Best effort: resolve the connected device's friendly name
+    (lockdownd short_info) so the tray menu can show it.
+
+    Called from the tray ticker: cached once resolved, retried until it
+    succeeds or the connection is released. Uses the same short-lived
+    lockdownd session the app already opens for the /list_devices poll
+    and the developer-mode check.
+    """
+    global device_name
+    if udid is None:
+        device_name = None
+        return
+    if device_name:
+        return
+    try:
+        if connection_type in ("Network", "Manual"):
+            host = wifihost or wifi_address
+            if not host:
+                return
+            client = create_using_tcp(hostname=host, identifier=udid)
+        else:
+            client = create_using_usbmux(udid, autopair=True)
+        try:
+            info = client.short_info or {}
+            name = info.get('DeviceName')
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if name:
+            device_name = str(name)
+            logger.info(f"Resolved device name for tray: {device_name}")
+    except Exception as e:
+        # Not fatal - the tray ticker retries on its next pass.
+        logger.debug(f"Could not resolve device name for tray: {e}")
+
+
 def release_connection_resources():
     stop_set_location_thread()
     stop_tunnel_thread_internal()
     clear_cached_rsd_data()
     global rsd_data
+    global device_name
     rsd_data = None
+    device_name = None
 
 
 @app.route('/connection_status', methods=['GET'])
@@ -1035,16 +1085,19 @@ def connect_wifi(data):
         if ios_version is not None and is_major_version_17_or_greater(ios_version):
             logger.info("iOS 17+ detected")
 
-            if version_check(ios_version):
-                try:
-                    devices = get_wifi_with_retry()
-                    #devices = "blah"
-                    logger.info(f"Connect Wifi Devices: {devices}")
-                    logger.info(f"Wifi Address:  {wifi_address}")
-                except RuntimeError as e:
-                    error_message = str(e)
-                    logger.error(f"Error: {error_message}")
-                    return jsonify({'error': 'No Devices Found'})
+            # Bonjour discovery (sets wifi_address/wifi_port) is needed for
+            # ALL iOS 17+ wifi tunnels: 17.0-17.3 use the QUIC protocol and
+            # 17.4+ (incl. 18/26/27) use the TCP tunnel protocol over the
+            # same remotepairing endpoint.
+            try:
+                devices = get_wifi_with_retry()
+                #devices = "blah"
+                logger.info(f"Connect Wifi Devices: {devices}")
+                logger.info(f"Wifi Address:  {wifi_address}")
+            except RuntimeError as e:
+                error_message = str(e)
+                logger.error(f"Error: {error_message}")
+                return jsonify({'error': 'No Devices Found'})
 
 
             rsd_host = None
@@ -1102,29 +1155,53 @@ async def start_wifi_tcp_tunnel() -> None:
     #         logger.warning("Installing WeTest Driver")
     #         cli_install_wetest_drivers()
 
-    #service = await create_core_device_tunnel_service_using_remotepairing(udid, wifi_address, wifi_port)
-    lockdown = create_using_usbmux(udid)
-    service = CoreDeviceTunnelProxy(lockdown)
+    lockdown = None
+    if connection_type in ("Network", "Manual"):
+        # Wi-Fi-only device: the CoreDeviceProxy service is not reachable over
+        # the network lockdownd connection (the device closes the socket
+        # before the CDTunnel handshake). Use the canonical RemotePairing
+        # path (bonjour pairing endpoint, set by get_wifi_with_retry) with
+        # the TCP tunnel protocol instead - same service as the QUIC branch,
+        # but TCP (QUIC was removed in iOS 18.2+).
+        service = await create_core_device_tunnel_service_using_remotepairing(
+            udid, wifi_address, wifi_port)
+    else:
+        lockdown = create_using_usbmux(udid)
+        service = CoreDeviceTunnelProxy(lockdown)
 
-    async with service.start_tcp_tunnel() as tunnel_result:
-        resume_remoted_if_required()
+    try:
+        async with service.start_tcp_tunnel() as tunnel_result:
+            resume_remoted_if_required()
 
-        logger.info(f'Identifier: {service.remote_identifier}')
-        logger.info(f'Interface: {tunnel_result.interface}')
-        logger.info(f'RSD Address: {tunnel_result.address}')
-        logger.info(f'RSD Port: {tunnel_result.port}')
-        global rsd_port
-        global rsd_host
-        rsd_host = tunnel_result.address
+            logger.info(f'Identifier: {service.remote_identifier}')
+            logger.info(f'Interface: {tunnel_result.interface}')
+            logger.info(f'RSD Address: {tunnel_result.address}')
+            logger.info(f'RSD Port: {tunnel_result.port}')
+            global rsd_port
+            global rsd_host
+            rsd_host = tunnel_result.address
 
-        rsd_port = str(tunnel_result.port)
+            rsd_port = str(tunnel_result.port)
 
 
-        while True:
-            if terminate_tunnel_thread is True:
-                return
-            # wait user input while the asyncio tasks execute
-            await asyncio.sleep(.5)
+            while True:
+                if terminate_tunnel_thread is True:
+                    return
+                # wait user input while the asyncio tasks execute
+                await asyncio.sleep(.5)
+    finally:
+        # Always release the session (service socket + lockdownd connection).
+        # If left open, the device keeps the session and refuses the next
+        # tunnel attempt ("Error in path (parsing) -> magic").
+        try:
+            await service.close()
+        except Exception:
+            pass
+        if lockdown is not None:
+            try:
+                lockdown.close()
+            except Exception:
+                pass
 
 async def start_wifi_quic_tunnel() -> None:
 
@@ -1732,10 +1809,16 @@ def py_list_devices():
 
             # udid = lockdown.udid
             # print("wifi udid", udid)
-            info = lockdown.short_info
+            try:
+                info = lockdown.short_info
+                # Modify the info dictionary to include wifiConState
+                wifi_connection_state = lockdown.enable_wifi_connections = True
+            finally:
+                # Close the session: the device only accepts one lockdownd
+                # session over the network, and a lingering list-poll
+                # connection breaks the next tunnel attempt
+                lockdown.close()
             logger.warning(f"Wifi Short Info: {info}")
-            # Modify the info dictionary to include wifiConState
-            wifi_connection_state = lockdown.enable_wifi_connections = True
             info['wifiState'] = wifi_connection_state
 
             # Modify the info dictionary to include user locale
@@ -2005,6 +2088,7 @@ if __name__ == '__main__':
 
     # System tray icon (best effort - the app runs fine without one).
     def _tray_state():
+        refresh_device_name()
         if route_active:
             line = f"Walking route: point {max(route_index, 0) + 1}/{len(route_points)}"
         elif route_paused:
@@ -2015,7 +2099,11 @@ if __name__ == '__main__':
             line = "Device connected"
         else:
             line = "No device connected"
-        return "GeoPort", line
+        if udid is not None:
+            device_line = f"Device: {device_name}" if device_name else "Device connected"
+        else:
+            device_line = ""
+        return "GeoPort", line, device_line
 
     try:
         import tray as geoport_tray

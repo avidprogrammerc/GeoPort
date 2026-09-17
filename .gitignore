@@ -13,3 +13,4 @@ build-py/
 launcher-dist/
 .venv/
 launcher_trace.log
+.pi/

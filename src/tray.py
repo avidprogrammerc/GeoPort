@@ -28,8 +28,9 @@ def _make_icon():
 def start_tray(get_state, url, on_quit, title="GeoPort"):
     """Start the tray icon in a background thread.
 
-    get_state() -> (tooltip, status_line) is polled every few seconds so
-    the menu stays current. on_quit() is invoked after "Quit" is chosen
+    get_state() -> (tooltip, status_line, device_line) is polled every few
+    seconds so the menu stays current. device_line (e.g. "Device: Dave's
+    iPhone") is shown as its own disabled menu item when non-empty. on_quit() is invoked after "Quit" is chosen
     (the icon is stopped first). Returns the pystray Icon, or None when
     no tray is available.
     """
@@ -39,7 +40,7 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
     # MenuItem.text is read-only in pystray 0.19.x, so the status line is
     # refreshed by rebuilding the menu (the backend re-reads icon.menu each
     # time the user opens it).
-    status = {"line": "starting…"}
+    status = {"line": "starting…", "device": ""}
 
     # Left-clicking the tray icon invokes the menu's *default* item; a
     # double-click sends two clicks back-to-back (two WM_LBUTTONUPs). Throttle
@@ -66,22 +67,26 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
         # menu object (Menu.__call__ -> default item). A tuple is not
         # callable, which made left/double-clicks die with a swallowed
         # TypeError.
-        return pystray.Menu(
+        items = [
             pystray.MenuItem("Open GeoPort", _open_ui, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(status["line"], lambda icon, item: None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", _quit),
-        )
+        ]
+        if status["device"]:
+            items.append(pystray.MenuItem(status["device"], lambda icon, item: None, enabled=False))
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("Quit", _quit))
+        return pystray.Menu(*items)
 
     icon = pystray.Icon("geoport", _make_icon(), title, _build_menu())
 
     def _refresh():
         try:
-            tooltip, line = get_state()
+            tooltip, line, device = get_state()
         except Exception:
-            tooltip, line = title, "error reading status"
+            tooltip, line, device = title, "error reading status", ""
         status["line"] = line
+        status["device"] = device
         try:
             icon.title = tooltip
             icon.menu = _build_menu()
