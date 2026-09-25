@@ -66,6 +66,8 @@ def test_index_serves_ui(client):
     assert "tunnelBanner" in body               # watchdog banner
     assert "savedLocations" in body             # presets UI
     assert "activityLogPanel" in body           # live log panel
+    assert "serverInfoPanel" in body            # server info panel
+    assert "/server_info" in body               # server info fetch
     assert "api.geoport.me" not in body         # telemetry removed
     assert "NordVPN" not in body                # promo banner removed
     assert r.headers.get("Cache-Control") == "no-store"
@@ -162,8 +164,39 @@ def test_api_md_lists_new_endpoints(mod):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     api_md = open(os.path.join(root, "API.md"), encoding="utf-8").read()
     for ep in ("/route_start", "/route_stop", "/route_status", "/health",
-               "/locations", "/log_tail", "/connection_status"):
+               "/server_info", "/locations", "/log_tail", "/connection_status"):
         assert ep in api_md
+
+
+# --- Server info -------------------------------------------------------------
+
+def test_server_info_shape(client):
+    r = client.get("/server_info")
+    assert r.status_code == 200
+    data = r.get_json()
+    for key in ("version", "port", "auth_enabled", "is_admin", "python_version"):
+        assert key in data
+    assert isinstance(data["port"], int)
+    assert isinstance(data["auth_enabled"], bool)
+    assert isinstance(data["is_admin"], bool)
+    assert isinstance(data["version"], str)
+    assert isinstance(data["python_version"], str)
+
+
+def test_server_info_values(mod, client, monkeypatch):
+    monkeypatch.setattr(mod, "chosen_port", 59999)
+    monkeypatch.setattr(mod, "GEOPORT_TOKEN", "secret")
+    data = client.get("/server_info").get_json()
+    assert data["port"] == 59999
+    assert data["auth_enabled"] is True
+    assert data["version"] == mod.APP_VERSION_NUMBER
+    assert data["python_version"] == sys.version
+
+
+def test_server_info_auth_off_by_default(client):
+    # Without GEOPORT_TOKEN in the environment, auth must report disabled.
+    data = client.get("/server_info").get_json()
+    assert data["auth_enabled"] is False
 
 
 # --- Port selection (instant-crash-on-launch regression, WSAEACCES 10013) ---

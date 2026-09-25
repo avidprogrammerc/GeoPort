@@ -757,6 +757,20 @@ function saveCurrentLocation() {
       .catch(() => displayToast('Could not save location'));
 }
 
+// ============ Server info ====================================================
+function loadServerInfo() {
+    var el = document.getElementById('serverInfo');
+    if (!el) return;
+    fetch('/server_info').then(r => r.json()).then(info => {
+        el.textContent =
+            'GeoPort version: ' + info.version + '\n' +
+            'Port: ' + info.port + '\n' +
+            'Auth enabled: ' + (info.auth_enabled ? 'yes' : 'no') + '\n' +
+            'Administrator: ' + (info.is_admin ? 'yes' : 'no') + '\n' +
+            'Python: ' + info.python_version;
+    }).catch(() => {});
+}
+
 // ============ Live activity log ============================================
 var activityLogTimer = null;
 function pollActivityLog() {
@@ -2758,6 +2772,7 @@ function continueAfterDeveloperModeRequired() {
     loadSavedLocations();
     restoreRouteState();
     wireActivityLog();
+    loadServerInfo();
     pollHealth();
     setInterval(pollHealth, 5000);
     document.getElementById('rsdData').addEventListener('change', updateSetLocationButtonStatus);
@@ -3012,6 +3027,11 @@ Feedback? Please see the <a href="https://www.surveymonkey.com/r/5LJR2M5" target
 
 </div>
 
+<!-- Server info -->
+<details id="serverInfoPanel" class="container mb-4">
+    <summary style="cursor:pointer; font-weight:500;">Server info</summary>
+    <pre id="serverInfo" style="background:#0d1117;color:#7ee787;padding:8px;overflow:auto;font-size:11px;border-radius:6px;margin-bottom:8px;"></pre>
+</details>
 <!-- Live activity log -->
 <details id="activityLogPanel" class="container mb-4">
     <summary style="cursor:pointer; font-weight:500;">Activity log (live, from GeoPort.log)</summary>

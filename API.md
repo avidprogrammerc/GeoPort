@@ -28,6 +28,7 @@ unauthenticated on localhost.
 | `/` | GET | The web UI |
 | `/connection_status` | GET | `status` (`disconnected`/`connecting`/`connected`), `udid`, `rsd_data` (tunnel host/port), `last_location` (`{lat,lng}` of the simulated spot, if any) |
 | `/health` | GET | Watchdog view: `connected`, `tunnel_ok`, `location_active`, `route_active`, `route_paused`, `route_error` |
+| `/server_info` | GET | Server facts: `version` (GeoPort), `port` (the port actually bound), `auth_enabled` (`GEOPORT_TOKEN` set), `is_admin`, `python_version` |
 | `/route_status` | GET | Route playback: `active`, `paused`, `finished`, `error`, `points`, `index`, `progress` (0–1), `speed_kmh`, `current` `{lat,lng}` |
 | `/list_devices` | GET | Devices currently visible to usbmuxd (USB + Wi-Fi) |
 | `/log_tail?lines=40` | GET | Tail of `GeoPort.log` (plain text, max 200 lines) |

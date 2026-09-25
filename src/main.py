@@ -115,6 +115,7 @@ home_dir = os.path.expanduser("~")
 is_windows = sys.platform == 'win32'
 base_directory = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(sys.argv[0])))
 flask_port = 54321
+chosen_port = flask_port  # updated by try_bind_listener_on_free_port()
 api_url = "https://projectzerothree.info/api.php?format=json"
 api_data = None
 user_locale = None
@@ -1620,6 +1621,22 @@ async def clear_device_location():
 
 # --- Health / watchdog ---------------------------------------------------------
 
+@app.route('/server_info')
+def server_info():
+    """Server facts for the UI's Server Info panel and external scripts."""
+    try:
+        is_admin = bool(pyuac.isUserAdmin())
+    except Exception:
+        is_admin = False
+    return jsonify({
+        'version': APP_VERSION_NUMBER,
+        'port': chosen_port,
+        'auth_enabled': bool(GEOPORT_TOKEN),
+        'is_admin': is_admin,
+        'python_version': sys.version,
+    })
+
+
 @app.route('/health')
 def health():
     """Lightweight status polled by the UI watchdog banner."""
@@ -1716,7 +1733,7 @@ def log_tail():
 # --- Optional API token (GEOPORT_TOKEN) ----------------------------------------
 
 _PUBLIC_GET_PATHS = {'/', '/connection_status', '/health', '/route_status',
-                     '/log_tail', '/locations', '/list_devices', '/api/fuel_types'}
+                     '/server_info', '/log_tail', '/locations', '/list_devices', '/api/fuel_types'}
 
 
 @app.before_request
