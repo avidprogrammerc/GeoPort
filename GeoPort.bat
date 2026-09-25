@@ -14,9 +14,13 @@ set TRACE=%~dp0launcher_trace.log
 call :log "BAT start (from: %0)"
 
 rem --- Already running? Just open the UI. ---
-powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 54321 -State Listen -ErrorAction SilentlyContinue) { Start-Process 'http://localhost:54321'; exit 1 }"
+rem Use the port the app recorded (GeoPort.port) if it had to abandon 54321.
+set PORT=54321
+if exist "%~dp0GeoPort.port" set /p PORT=<"%~dp0GeoPort.port"
+if not defined PORT set PORT=54321
+powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue) { Start-Process 'http://localhost:%PORT%'; exit 1 }"
 if %errorlevel%==1 ( call :log "already running - opened browser" & exit /b )
-call :log "port 54321 free"
+call :log "port %PORT% free"
 
 rem --- Elevate this batch once, then run the launcher hidden. ---
 net session >nul 2>&1

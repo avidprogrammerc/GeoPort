@@ -10,8 +10,13 @@ locations, log tail, health/route status shapes). Device-dependent flows
 """
 import importlib.util
 import json
+import logging
 import os
+import socket
 import sys
+import threading
+import time
+import urllib.request
 
 import pytest
 
@@ -159,3 +164,135 @@ def test_api_md_lists_new_endpoints(mod):
     for ep in ("/route_start", "/route_stop", "/route_status", "/health",
                "/locations", "/log_tail", "/connection_status"):
         assert ep in api_md
+
+
+# --- Port selection (instant-crash-on-launch regression, WSAEACCES 10013) ---
+
+def test_is_port_in_use_detects_ipv4_listener(mod):
+    # The check used to connect to 'localhost', which on Windows resolves to
+    # ::1 (IPv6) and misses an IPv4-only 127.0.0.1 listener on the port.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        assert mod.is_port_in_use(port) is True
+    finally:
+        s.close()
+    assert mod.is_port_in_use(port) is False
+
+
+def test_port_selection_skips_busy_port(mod):
+    # Preferred port already LISTENing -> a different, verified port is used.
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    busy = blocker.getsockname()[1]
+    old_preferred = mod.flask_port
+    mod.flask_port = busy
+    try:
+        sock, port = mod.try_bind_listener_on_free_port()
+    finally:
+        mod.flask_port = old_preferred
+        blocker.close()
+    try:
+        assert sock is not None
+        assert port != busy
+    finally:
+        sock.close()
+
+
+def test_port_selection_survives_bind_failure(mod, monkeypatch):
+    # The original crash: a port that looks free fails bind() with
+    # WSAEACCES (10013) because Windows re-rolls ephemeral exclusion ranges
+    # on every boot. Any OSError from bind must trigger the next candidate,
+    # not just EADDRINUSE.
+    calls = []
+    real = mod._verified_port_socket
+
+    def fake(port):
+        calls.append(port)
+        if len(calls) == 1:
+            mod.logger.warning(
+                f'Port {port} not usable (bind failed: '
+                'An attempt was made to access a socket in a way forbidden by its access permissions'
+                ') - trying next')
+            return None
+        return real(port)
+
+    monkeypatch.setattr(mod, "_verified_port_socket", fake)
+    sock, port = mod.try_bind_listener_on_free_port()
+    try:
+        assert calls[0] == mod.flask_port  # preferred tried first
+        assert port != calls[0]
+        assert sock is not None
+    finally:
+        sock.close()
+
+
+def test_rejected_port_is_logged(mod, caplog):
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    busy = blocker.getsockname()[1]
+    old_preferred = mod.flask_port
+    mod.flask_port = busy
+    try:
+        with caplog.at_level(logging.INFO, logger="GeoPort"):
+            sock, port = mod.try_bind_listener_on_free_port()
+    finally:
+        mod.flask_port = old_preferred
+        blocker.close()
+        sock.close()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(f"Port {busy} in use" in m for m in messages)
+    assert any(f"Serving: http://localhost:{port}" in m for m in messages)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="pyuac elevation path is Windows-only")
+def test_admin_relaunch_exits_parent(mod, monkeypatch):
+    # pyuac.runAsAdmin() blocks until the elevated child exits and then
+    # returns; the non-elevated parent used to continue and start a second
+    # instance. It must sys.exit() instead (documented pyuac pattern).
+    monkeypatch.setattr(mod.pyuac, "isUserAdmin", lambda: False)
+    monkeypatch.setattr(mod.pyuac, "runAsAdmin", lambda: 42)
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 42
+
+
+def test_port_file_written(mod):
+    # The launchers (start.ps1 / GeoPort.bat) rely on GeoPort.port to find
+    # the UI when the fallback port is in use.
+    sock, port = mod.try_bind_listener_on_free_port()
+    try:
+        with open(os.path.join(os.getcwd(), "GeoPort.port"), encoding="utf-8") as f:
+            assert f.read().strip() == str(port)
+    finally:
+        sock.close()
+
+
+def test_flask_serves_on_verified_port(mod):
+    # End-to-end: the verified socket actually serves HTTP. On a machine
+    # where 54321 is in an OS ephemeral exclusion range this is what the old
+    # app.run() path crashed on.
+    web_socket, port = mod.try_bind_listener_on_free_port()
+    server = mod.make_server("127.0.0.1", port, mod.app, fd=web_socket.fileno())
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        body = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/connection_status", timeout=1) as r:
+                    body = r.read()
+                break
+            except Exception:
+                time.sleep(0.2)
+        assert body is not None and b'"status"' in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        web_socket.close()

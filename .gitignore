@@ -1,5 +1,6 @@
 GeoPort.log
 GeoPort.log.*
+GeoPort.port
 __pycache__/
 *.pyc
 .env

@@ -11,6 +11,25 @@ $ErrorActionPreference = 'Stop'
 $repo  = $PSScriptRoot
 $py    = Join-Path $repo '.venv\Scripts\python.exe'
 $port  = 54321
+$portFile = Join-Path $repo 'GeoPort.port'
+
+# main.py writes GeoPort.port when it has to abandon 54321 (e.g. Windows has
+# excluded that port from the ephemeral range on this boot). Re-read it on
+# every poll so the watcher finds the UI on the fallback port.
+function Get-EffectivePort {
+    $p = $port
+    if (Test-Path $portFile) {
+        $candidate = (Get-Content $portFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($candidate -match '^\d+$' -and [int]$candidate -ge 1 -and [int]$candidate -le 65535) {
+            $p = [int]$candidate
+        }
+    }
+    return $p
+}
+
+function Test-PortListening($p) {
+    return [bool](Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)
+}
 
 $trace = Join-Path $repo 'launcher_trace.log'
 function Log($m) { Add-Content -Path $trace -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
@@ -30,10 +49,15 @@ if (-not (Test-Path $py)) {
     }
 }
 
-# Already running?
-if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
-    Write-Host "GeoPort is already running on http://localhost:$port"
-    Start-Process "http://localhost:$port"
+# Already running? Check the default port and the last recorded one.
+$up = $false
+$upPort = $null
+foreach ($p in @($port, (Get-EffectivePort))) {
+    if (Test-PortListening $p) { $up = $true; $upPort = $p; break }
+}
+if ($up) {
+    Write-Host "GeoPort is already running on http://localhost:$upPort"
+    Start-Process "http://localhost:$upPort"
     exit 0
 }
 
@@ -56,7 +80,7 @@ Write-Host "Starting GeoPort..."
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 2
-    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
+    if (Test-PortListening (Get-EffectivePort)) {
         $ok = $true
         break
     }
@@ -64,7 +88,7 @@ for ($i = 0; $i -lt 30; $i++) {
 
 if ($ok) {
     Log "port is up (main.py opens the browser itself - don't open it again here)"
-    Write-Host "GeoPort is up: http://localhost:$port"
+    Write-Host "GeoPort is up: http://localhost:$(Get-EffectivePort)"
 } else {
     $alive = (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) -ne $null
     Log ("port NOT up after 60s (python alive? {0})" -f $alive)

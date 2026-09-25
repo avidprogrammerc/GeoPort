@@ -20,6 +20,7 @@ import pycountry
 from logging.handlers import RotatingFileHandler
 
 from flask import Flask, jsonify, make_response, render_template, request, Response
+from werkzeug.serving import make_server
 from urllib3.exceptions import InsecureRequestWarning, ConnectionError
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 from contextlib import asynccontextmanager
@@ -2026,35 +2027,78 @@ def open_browser():
 
 
 def is_port_in_use(port):
+    # Check the exact address the server binds (127.0.0.1). 'localhost' can
+    # resolve to ::1 (IPv6), which reports an IPv4-only listener as free.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
-    # with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    #     try:
-    #         s.bind((' ', port))
-    #         return False  # Port is available
-    #     except OSError:
-    #         return True  # Port is already in use
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+
+def _verified_port_socket(port):
+    """Prove a port is usable with a real bind, and return the bound socket.
+
+    The old connect-existence check missed two Windows failure classes:
+    ports inside the OS ephemeral exclusion ranges (bind fails with
+    WSAEACCES 10013 while the port looks free) and ports transiently held
+    as ephemeral client ports. Any OSError counts as 'not usable'.
+    Returns a bound+listening socket, or None.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(('127.0.0.1', port))
+        sock.listen(128)
+        return sock
+    except OSError as e:
+        logger.warning(f'Port {port} not usable (bind failed: {e}) - trying next')
+        sock.close()
+        return None
+
+
+def _write_port_file(port):
+    """Record the chosen port next to the log so the launchers (start.ps1,
+    GeoPort.bat) can find the UI when 54321 had to be abandoned (e.g. the
+    OS excluded it from the ephemeral range on this boot)."""
+    try:
+        with open(os.path.join(os.getcwd(), 'GeoPort.port'), 'w', encoding='utf-8') as f:
+            f.write(str(port))
+    except OSError as e:
+        logger.warning(f'Could not write GeoPort.port: {e}')
 
 
 # Define try_bind_listener_on_free_port function
 def try_bind_listener_on_free_port():
+    """Pick the web port by verifying each candidate with a real bind.
+
+    Returns (socket, port): the caller hands the verified socket to the
+    server so it never re-binds a port that stopped being usable. The
+    preferred port (54321, or --port) goes first; fallbacks are drawn
+    outside the OS ephemeral band (49152-65535) first, because Windows
+    re-rolls random exclusion blocks inside that band on every boot and a
+    port inside one fails bind() with WSAEACCES (10013) while looking free.
+    """
     global chosen_port
-    min_port = 49215
-    max_port = 65535
+    preferred = args.port if args.port else flask_port
+    candidates = [preferred]
+    candidates.extend(random.randint(40000, 49151) for _ in range(5))
+    candidates.extend(random.randint(49215, 65535) for _ in range(3))
+    seen = set()
+    for port in candidates:
+        if port in seen:
+            continue
+        seen.add(port)
+        if is_port_in_use(port):
+            logger.info(f'Port {port} in use - trying next')
+            continue
+        sock = _verified_port_socket(port)
+        if sock is not None:
+            chosen_port = port
+            _write_port_file(port)
+            logger.info(f'Serving: http://localhost:{chosen_port}')
+            return sock, chosen_port
+    raise RuntimeError('No usable port found for the web UI (every candidate failed to bind)')
 
-    # Check if --port argument is provided
-    if args.port:
-        chosen_port = args.port
-    else:
-        chosen_port = flask_port
 
-    if is_port_in_use(chosen_port):
-        chosen_port = random.randint(min_port, max_port)
-    logger.info(f'Serving: http://localhost:{chosen_port}')
-    return chosen_port
-
-
-if __name__ == '__main__':
+def main():
     #create_geoport_folder()
     if is_windows:
         try:
@@ -2067,13 +2111,17 @@ if __name__ == '__main__':
             pass
         if not pyuac.isUserAdmin():
             print("Relaunching as Admin")
-            pyuac.runAsAdmin()
+            # runAsAdmin() blocks until the elevated instance exits and then
+            # returns - the parent must NOT continue (it would start a second
+            # instance that races the first for the web port and one of them
+            # dies with a bind error).
+            sys.exit(pyuac.runAsAdmin())
     #else:
 
 
 
 
-    chosen_port = try_bind_listener_on_free_port()
+    web_socket, chosen_port = try_bind_listener_on_free_port()
 
     # Check if --no-browser flag is provided
     if not args.no_browser:
@@ -2112,6 +2160,28 @@ if __name__ == '__main__':
     except Exception as e:
         logger.warning(f"Tray icon unavailable: {e}")
 
+    def _serve():
+        # Bind to localhost only and never run the debug console: this is a
+        # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
+        # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.
+        # make_server(fd=...) hands the server the already-verified socket, so
+        # the app cannot die between the port check and the bind (the old
+        # check-then-bind race crashed instantly and silently on ports Windows
+        # excludes from its ephemeral range: WSAEACCES 10013, no console).
+        try:
+            server = make_server('127.0.0.1', chosen_port, app, fd=web_socket.fileno())
+            logger.info(f'Running on http://127.0.0.1:{chosen_port} (Press CTRL+C to quit)')
+            server.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("Shutting down")
+            raise
+        except SystemExit as e:
+            logger.error(f'Web server exited during startup: {e}')
+            raise
+        except OSError as e:
+            logger.error(f'Web server failed to start on port {chosen_port}: {e}')
+            raise
+
     if sys.platform == "darwin" and tray_icon is not None and os.geteuid() != 0:
         # pystray's macOS backend must run its NSApplication event loop on
         # the main thread, so run the web server on a worker thread and
@@ -2120,7 +2190,7 @@ if __name__ == '__main__':
         # user-level tray_helper.py process shows the menu bar icon.
         logger.info("macOS: tray owns the main thread, web server on worker thread")
         threading.Thread(
-            target=lambda: app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1'),
+            target=_serve,
             daemon=True,
             name="geoport-web",
         ).start()
@@ -2128,12 +2198,13 @@ if __name__ == '__main__':
             tray_icon.run()
         except Exception as e:
             logger.warning(f"Tray loop failed ({e}); continuing with web server on main thread")
-            app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
+            _serve()
     else:
-        # Bind to localhost only and never run the debug console: this is a
-        # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
-        # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.
-        app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
+        _serve()
+
+
+if __name__ == '__main__':
+    main()
 
 
 
