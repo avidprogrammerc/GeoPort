@@ -3,6 +3,7 @@
 Best effort: if pystray/Pillow are missing or there is no usable system
 tray (tests, headless), the app runs exactly as before without one.
 """
+import sys
 import threading
 import time
 import webbrowser
@@ -95,6 +96,11 @@ def start_tray(get_state, url, on_quit, title="GeoPort"):
 
     def _runner():
         _refresh()
+        if sys.platform == "darwin":
+            # pystray's macOS backend requires Icon.run() on the main
+            # thread; run_detached() is a no-op there. main.py runs
+            # icon.run() on the main thread instead.
+            return
         icon.run_detached()
 
     def _ticker():

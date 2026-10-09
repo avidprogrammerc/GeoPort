@@ -2105,16 +2105,29 @@ if __name__ == '__main__':
             device_line = ""
         return "GeoPort", line, device_line
 
+    tray_icon = None
     try:
         import tray as geoport_tray
-        geoport_tray.start_tray(_tray_state, f"http://localhost:{chosen_port}", shutdown_server)
+        tray_icon = geoport_tray.start_tray(_tray_state, f"http://localhost:{chosen_port}", shutdown_server)
     except Exception as e:
         logger.warning(f"Tray icon unavailable: {e}")
 
-    # Bind to localhost only and never run the debug console: this is a
-    # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
-    # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.
-    app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
+    if sys.platform == "darwin" and tray_icon is not None:
+        # pystray's macOS backend must run its NSApplication event loop on
+        # the main thread, so run the web server on a worker thread and
+        # block the main thread in the tray loop instead.
+        logger.info("macOS: tray owns the main thread, web server on worker thread")
+        threading.Thread(
+            target=lambda: app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1'),
+            daemon=True,
+            name="geoport-web",
+        ).start()
+        tray_icon.run()
+    else:
+        # Bind to localhost only and never run the debug console: this is a
+        # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
+        # it (and a Werkzeug RCE console) reachable from anywhere on the LAN.
+        app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
 
 
 
