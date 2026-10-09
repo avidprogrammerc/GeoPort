@@ -2112,17 +2112,23 @@ if __name__ == '__main__':
     except Exception as e:
         logger.warning(f"Tray icon unavailable: {e}")
 
-    if sys.platform == "darwin" and tray_icon is not None:
+    if sys.platform == "darwin" and tray_icon is not None and os.geteuid() != 0:
         # pystray's macOS backend must run its NSApplication event loop on
         # the main thread, so run the web server on a worker thread and
-        # block the main thread in the tray loop instead.
+        # block the main thread in the tray loop instead. When running
+        # elevated, AppKit cannot show a status item at all - the
+        # user-level tray_helper.py process shows the menu bar icon.
         logger.info("macOS: tray owns the main thread, web server on worker thread")
         threading.Thread(
             target=lambda: app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1'),
             daemon=True,
             name="geoport-web",
         ).start()
-        tray_icon.run()
+        try:
+            tray_icon.run()
+        except Exception as e:
+            logger.warning(f"Tray loop failed ({e}); continuing with web server on main thread")
+            app.run(debug=False, use_reloader=False, port=chosen_port, host='127.0.0.1')
     else:
         # Bind to localhost only and never run the debug console: this is a
         # control plane for a paired iOS device, and 0.0.0.0 + debug=True made
