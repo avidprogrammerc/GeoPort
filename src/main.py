@@ -1709,9 +1709,12 @@ def save_location_preset():
 
 @app.route('/locations/<path:name>', methods=['DELETE'])
 def delete_location_preset(name):
-    items = [i for i in _load_locations() if i.get('name') != name]
-    _save_locations(items)
-    return jsonify(items)
+    items = _load_locations()
+    remaining = [i for i in items if i.get('name') != name]
+    if len(remaining) == len(items):
+        return jsonify({'error': f'location not found: {name}'}), 404
+    _save_locations(remaining)
+    return jsonify(remaining)
 
 
 # --- Live activity log ----------------------------------------------------------

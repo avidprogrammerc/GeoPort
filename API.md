@@ -74,7 +74,7 @@ Stored in `~/.geoport/locations.json`.
 |---|---|---|---|
 | `/locations` | GET | – | List presets |
 | `/locations` | POST | `{name, lat, lng}` | Create/update a preset |
-| `/locations/<name>` | DELETE | – | Remove a preset |
+| `/locations/<name>` | DELETE | – | Remove a preset (404 if not found) |
 
 ### Fuel (external data, best effort)
 

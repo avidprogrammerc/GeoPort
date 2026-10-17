@@ -717,7 +717,31 @@ function loadSavedLocations() {
             o.textContent = it.name;
             sel.appendChild(o);
         });
+        updateDeleteLocationBtn();
     }).catch(() => {});
+}
+
+function updateDeleteLocationBtn() {
+    var sel = document.getElementById('savedLocations');
+    var btn = document.getElementById('deleteLocationBtn');
+    if (sel && btn) { btn.disabled = !sel.value; }
+}
+
+function deleteSavedLocation() {
+    var sel = document.getElementById('savedLocations');
+    if (!sel || !sel.value) return;
+    var name = sel.options[sel.selectedIndex].textContent;
+    if (!name) return;
+    if (!confirm('Remove "' + name + '" from saved locations?')) return;
+    fetch('/locations/' + encodeURIComponent(name), { method: 'DELETE' })
+      .then(r => { if (!r.ok) throw new Error(r.status); })
+      .then(() => {
+          sel.value = '';
+          updateDeleteLocationBtn();
+          displayToast('Removed "' + name + '"');
+          loadSavedLocations();
+      })
+      .catch(() => displayToast('Could not remove location'));
 }
 
 function applySavedLocation() {
@@ -2820,9 +2844,12 @@ function continueAfterDeveloperModeRequired() {
             <button type="button" class="btn btn-primary" id="search" onclick="handleSearch()">Search</button>
         </div>
         <div class="col-md-auto">
-            <select class="form-select form-select-sm" id="savedLocations" title="Saved locations" onchange="applySavedLocation()" style="width:auto;">
+            <select class="form-select form-select-sm" id="savedLocations" title="Saved locations" onchange="applySavedLocation(); updateDeleteLocationBtn();" style="width:auto;">
                 <option value="">Saved locations…</option>
             </select>
+        </div>
+        <div class="col-md-auto">
+            <button type="button" class="btn btn-outline-danger btn-sm" id="deleteLocationBtn" onclick="deleteSavedLocation()" title="Remove the selected saved location" disabled>✕</button>
         </div>
         <div class="col-md-auto">
             <button type="button" class="btn btn-outline-secondary" id="saveLocationBtn" onclick="saveCurrentLocation()" title="Save the current location as a preset">Save</button>

@@ -12,10 +12,13 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -70,6 +73,11 @@ def test_index_serves_ui(client):
     assert "/server_info" in body               # server info fetch
     assert "api.geoport.me" not in body         # telemetry removed
     assert "NordVPN" not in body                # promo banner removed
+    assert 'id="deleteLocationBtn"' in body     # delete-preset button
+    assert "deleteSavedLocation" in body        # delete handler
+    assert "updateDeleteLocationBtn" in body    # button enabled/disabled wiring
+    assert "encodeURIComponent(name)" in body   # names URL-encoded before fetch
+    assert "method: 'DELETE'" in body           # DELETE /locations/<name>
     assert r.headers.get("Cache-Control") == "no-store"
 
 
@@ -145,6 +153,59 @@ def test_saved_locations_roundtrip(client):
     assert r.status_code == 200
     assert [i["name"] for i in r.get_json()] == []
     assert client.get("/locations").get_json() == []
+
+
+def test_saved_location_delete(client):
+    client.post("/locations", json={"name": "Home", "lat": -33.8, "lng": 151.2})
+    client.post("/locations", json={"name": "Work (HQ)", "lat": -37.8, "lng": 144.9})
+
+    # deleting a missing preset -> 404, state unchanged
+    r = client.delete("/locations/Nope")
+    assert r.status_code == 404
+    assert "not found" in r.get_json()["error"]
+    names = [i["name"] for i in client.get("/locations").get_json()]
+    assert names == ["Home", "Work (HQ)"]
+
+    # delete by name with spaces/parens -> remaining list returned
+    r = client.delete("/locations/Work (HQ)")
+    assert r.status_code == 200
+    remaining = r.get_json()
+    assert [i["name"] for i in remaining] == ["Home"]
+    assert [i["name"] for i in client.get("/locations").get_json()] == ["Home"]
+
+    # slashes and unicode in names round-trip through the URL path
+    client.post("/locations", json={"name": "a/b café", "lat": 0.0, "lng": 0.0})
+    r = client.delete("/locations/" + urllib.parse.quote("a/b café"))
+    assert r.status_code == 200
+    assert [i["name"] for i in client.get("/locations").get_json()] == ["Home"]
+
+    # leave a clean slate for later tests
+    assert client.delete("/locations/Home").status_code == 200
+    assert client.get("/locations").get_json() == []
+
+
+def test_saved_location_delete_auth(monkeypatch, mod, client):
+    monkeypatch.setattr(mod, "GEOPORT_TOKEN", "secret")
+    client.post("/locations", json={"name": "T", "lat": 0.0, "lng": 0.0},
+                headers={"X-GeoPort-Token": "secret"})
+    # without the token, DELETE is not a public path -> 401
+    assert client.delete("/locations/T").status_code == 401
+    # with the token it works and empties the list
+    r = client.delete("/locations/T", headers={"X-GeoPort-Token": "secret"})
+    assert r.status_code == 200
+    assert client.get("/locations").get_json() == []
+
+
+def test_saved_location_js_behavior():
+    # Node-driven behavioral check of the frontend delete flow in map.html
+    # (select wiring, confirm, DELETE fetch + reload, toasts, failure paths).
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([node, os.path.join("tests", "js_delete_location_check.js")],
+                       capture_output=True, text=True, cwd=root)
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_log_tail(client):
