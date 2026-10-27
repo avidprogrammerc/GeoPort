@@ -15,3 +15,5 @@ launcher-dist/
 .venv/
 launcher_trace.log
 .pi/
+# NUL device shows up as an untracked "nul" file in every dir (reserved name)
+nul
